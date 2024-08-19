@@ -1,0 +1,216 @@
+---
+title: "Johns Hopkins COVID rmd"
+author: "M. Radel"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+## Data Gathering & Cleaning
+
+**Please note my knitted document does not contain my code chunks. View the full .rmd document to see my code and code annotation.**
+
+Johns Hopkins had many different data points related to collected COVID-19 data. For this project, after looking through the available data, I chose to focus on only the global data.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(readr)
+```
+
+```{r gather_data, echo = FALSE}
+
+#url prefix
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+#Individual file names for data
+file_names <- c("time_series_covid19_confirmed_US.csv","time_series_covid19_confirmed_global.csv","time_series_covid19_deaths_US.csv","time_series_covid19_deaths_global.csv","time_series_covid19_recovered_global.csv")
+
+#concatenate urls
+urls <- str_c(url_in,file_names)
+
+#I decided to only use the global data
+
+global_confirmed_cases <- read_csv(urls[2])
+global_deaths <- read_csv(urls[4])
+lookup_table <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv")
+
+
+```
+
+As a point of interest, and given that latitude and longitude data was available in the source data, I chose to analyze COVID-19 cases, deaths, and proportion of cases resulting in death relative to the latitude of the location.
+
+While there are certainly several confounding variables that may explain some of the data patterns (i.e. country wealth, population density), latitude approximately coincides with temperature and seasonal weather patterns. Locations closest to the equator (latitude of 0) tend to have very warm temperatures year-round, with little to no seasonal change. The weather closer to the poles becomes increasingly seasonal (think about 24 hour days or nights close to the poles!) and generally cooler. It is not unusual for bacteria or viruses to thrive more and survive longer at a certain temperature. Therefore, I hope the plotted latitude data provides a rough sketch of how well COVID-19 'performs' in different temperature climates.
+
+Since the global data had separate statistics for states/provinces where reported, and since the states and provinces in these countries tend to not be at the same latitude, I have kept the local state/province data as its own 'location' where applicable. Otherwise, I calculated the data based on the entire country.
+
+From this point forward, I use the word/column **'Location'** to refer to the state/province of a country if the data was provided, and to refer to the entire country if no state/province data is provided.
+
+
+```{r clean_data, echo = FALSE}
+
+#pivoting to fix dates
+global_confirmed_cases <- global_confirmed_cases %>%
+  pivot_longer(cols = -c('Province/State','Country/Region',Lat,Long),
+    names_to ="date",
+    values_to = "cases")
+
+#pivoting to fix dates
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = -c('Province/State','Country/Region', Lat,Long),
+    names_to = "date",
+    values_to = "deaths")
+
+#Join to put cases and deaths into one table
+global_combined <- global_confirmed_cases %>%
+  full_join(global_deaths) %>%
+  rename(Country_Region = 'Country/Region', 
+         Province_State = 'Province/State') %>%
+  mutate(date = mdy(date))
+
+#Adding in population data
+global_combined <- global_combined %>%
+  full_join(lookup_table) 
+
+#Adjusting to remove unwanted columns, filter for cases > 0 and dates only in 2022
+global_combined <- global_combined %>%
+  as_tibble() %>%
+  select(cols = -c('UID':'Combined_Key')) %>%
+  filter(cases > 0) %>%
+  filter(date >= "2022-01-01" & date<= "2022-12-31") %>%
+  select(cols = -(Long))
+
+
+#Pulling location from Province/State if available, from Country/Region if not
+year_sum <- global_combined %>%
+  mutate(location = ifelse(is.na(Province_State),Country_Region, Province_State))%>%
+  mutate(total_cases = max(cases), .by = location) %>%
+  mutate(total_deaths = max(deaths), .by = location) 
+
+#Fixing columns, collapsing rows for one row per location, adding % deadly statistic
+global_totals <- year_sum %>%
+  select(cols = -c(date:deaths)) %>%
+  distinct() %>%
+  mutate(percent_deadly = total_deaths/total_cases) %>%
+  mutate(prop_cases = total_cases/Population) %>%
+  mutate(prop_deaths = total_deaths/Population)
+  
+
+#Removing NA results for any latitudes not reported and for any cases/deaths not reported
+global_totals <- global_totals %>%
+  drop_na(Lat:percent_deadly) %>%
+  filter(Lat != 0.000)
+
+
+
+```
+
+# Visualizations
+
+The first plot I created here shows the total cases for each location plotted against latitude. For ease in readability of the plot and because Antarctica is a bit of a 'special case' given that its population fluctuates quite a bit and there is no 'official' population, I excluded it from the plotted data. Most of the population of Antarctica are researches who stay seasonally or for a single year.
+
+A line of best fit has been introduced to plot an approximate trend by latitude.
+
+As an additional note, some of the global data contains information for outbreaks on cruise ships (i.e. MS Zaandam, Diamond Princess, and Grand Princess) as well as the Summer 2020 and Winter 2022 Olympics. Since the Olympics had an exact location and therefore a latitude to record, I have included them. However, the cruise ships all had a reported '0.00000' latitude despite sailings taking place at multiple latitudes which often didn't even include the equator. Since this latitude reporting is essentially inaccurate, I have excluded them.
+
+A log scale was used in both the raw total cases and raw total deaths plots to make for easier viewing.
+
+```{r plot 1, echo = FALSE}
+
+plot1 <- ggplot(global_totals, aes(x = Lat, y = total_cases)) + 
+    geom_point() +
+    xlim(-52,72) + scale_y_log10() +
+    geom_smooth() +
+    ggtitle("Total Cases Plotted by Latitude")+
+    coord_flip() +
+    xlab("Latitude") + ylab("Total Cases in 2022")   
+plot1
+```
+
+This is just the raw number of cases, not accounting for population. Let's adjust for population here!
+
+
+```{r plot 1b, echo = FALSE}
+plot1b <- ggplot(global_totals, aes(x = Lat, y = prop_cases)) + 
+    geom_point() +
+    xlim(-52,72) + 
+    geom_smooth() +
+    ggtitle("Proportion of Cases in Population, Plotted by Latitude")+
+    coord_flip() +
+    xlab("Latitude") + ylab("Cases as Proportion of Population")  
+
+plot1b
+
+```
+
+You'll see that I have also flipped the x and y axis; the y-axis plots latitude, so the chart can be visualized similar to a globe, with the northernmost locations at the top and southernmost at the bottom of the y-axis.
+
+Next, we have essentially the same visualization as previously but this time plotting total deaths in 2022.
+
+```{r plot 2, echo = FALSE}
+plot2 <- ggplot(global_totals, aes(x = Lat, y = total_deaths)) + 
+    geom_point() +
+    xlim(-52,72) + scale_y_log10() +
+    geom_smooth() +
+    ggtitle("Total Deaths Plotted by Latitude")+
+    coord_flip() +
+    xlab("Latitude") + ylab("Total Deaths in 2022")  
+plot2
+```
+
+Again, this was only the raw death total. Here it is adjusted for population!
+
+```{r plot 2b, echo = FALSE}
+plot2b <- ggplot(global_totals, aes(x = Lat, y = prop_deaths)) + 
+    geom_point() +
+    xlim(-52,72) + 
+    geom_smooth() +
+    ggtitle("Proportion of Deaths in Population, Plotted by Latitude")+
+    coord_flip() +
+    xlab("Latitude") + ylab("Deaths as Proportion of Population")  
+
+plot2b
+```
+
+As a slightly less population-dependent metric, I calculated the proportion of cases which were deadly in 2022. The extreme point sitting around 0.18 is Yemen, which seems to be an approximately accurate number. However, North Korea in this global dataset reports 1 case and 6 deaths... which of course doesn't make sense, and so has been excluded here.
+
+```{r plot 3, echo = FALSE}
+plot3 <- ggplot(global_totals, aes(x = Lat, y = percent_deadly)) +
+    geom_point() +
+    xlim(-52,72) + ylim(0,0.2) + 
+    geom_smooth() +
+    ggtitle("Proportion of Cases Resulting in Death")+
+    coord_flip() +
+    xlab("Latitude") + ylab("Proportion Deadly Cases in 2022") 
+plot3
+```
+
+The outlier here is Yemen, which does appear to have a valid proportion at about .18. However, I've re-plotted the same chart to view the lower proportions more clearly with Yemen excluded.
+
+```{r plot 3b, echo = FALSE}
+
+plot3b <- ggplot(global_totals, aes(x = Lat, y = percent_deadly)) +
+    geom_point() +
+    xlim(-52,72) + ylim(0,0.08) + 
+    geom_smooth() +
+    ggtitle("Proportion of Cases Resulting in Death, Yemen Excluded")+
+    coord_flip() +
+    xlab("Latitude") + ylab("Proportion Deadly Cases in 2022") 
+
+plot3b
+```
+
+# Analysis and Conclusions
+
+As a general trend for both total cases and total deaths in 2022, it appears that countries closest to the equator have fewer overall cases, especially when adjusted for population. This trend, however, doesn't seem to translate to the proportion of the population experiencing COVID-19 deaths. In that plot, it seems like there is a spike in deaths right around a latitude of 50 (but not at -50!). However, when it comes to looking at the proportion of cases resulting in death, there's a change in trend; locations closest to the equator tend to have a higher proportion resulting in death.
+
+A few potential conclusions could be made from this data. First, while equatorial locations seem to have less of their overall population contract COVID-19, those same locations have higher fatality rates for those who do end up contracting the disease. Potential explanations for both of these seemingly contradictory trends could be lower population density for these locations combined with fewer resources to treat COVID-19. This would be the case of remote, rural areas, where transmission would be relatively low but fatality relatively high given that medical facilities with needed equipment to support patients with COVID may be far away or otherwise inaccessible.
+
+A potential ecological and biological explanation for this same phenomenon could be that the COVID-19 virus survives more poorly in the equatorial locations, but is more effective at causing severe infection when the population living there is infected. Certain genetic components at the population level or other pre-existing conditions more common at these latitudes (i.e. genetic variants reducing immune system effectiveness against COVID-19 or prior Malaria infection) could increase an individual's vulnerability to severe infection.
+
+An explanation for the higher proportion of population deaths around the 50 degree latitude line is a little harder to come up with. Potential explanations could include something such as fewer medical resources relative to population, resulting in an overwhelmed hospital system and therefore higher death rates. However, from a biological/ecological perspective, a genetic component could provide an explanation. Further looks at the countries with a higher proportion of populating dying from COVID-19 shows that many of them are in the same general (European) region. Further research and investigation may benefit from close examination of common socioeconomic factors these countries share as well as distinct genetic components from the people in this region, especially the genetic composition of people confirmed to die from COVID-19 in these regions.
+
+Lastly, it's important to discuss potential sources of bias. The most obvious and likely largest source of bias here could be misrepresented or inaccurate reporting from countries and states/provinces. This could occur for a number of reasons, not all of which are nefarious. Countries such as New Zealand have large swaths of rural, hard-to-reach tribes which speak many different languages. These types of factors can make it hard to reach the populations and gather needed information for reporting. A lack of infrastructure for COVID-19 testing could also interfere with an accurate count. There is also a potential source of reporting bias from countries which may want to flaunt their 'medical superiority' or which may want to hide gaps in their medical systems which became more obvious when looking at a true count of COVID-19 cases and deaths. I had noted that many provinces in China reported remarkably few deaths (often <10) where these regions have tens of millions of residents. That said, I still included that data in full, given that the low values are still theoretically plausible and there seems to be no other readily available data sources with more verifiable accuracy.
+
+In conclusion, since latitude is a very broad measurement that roughly encapsulates the climate of different regions of the world, any number of confounding factors could potentially explain some of the trends shown here. However, the relatively distinct trends by latitude could serve as a starting point for future investigation into COVID-19/climate interactions.
+
